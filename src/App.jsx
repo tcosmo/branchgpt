@@ -258,16 +258,6 @@ const wrapFirstMatchWithBranchHighlight = (
 };
 
 const remarkBranchHighlights = () => {
-  const markerToText = (marker) => {
-    if (marker.kind === "end") {
-      return marker.highlightType === "branch" ? BRANCH_HL_END : TEMP_HL_END;
-    }
-    if (marker.highlightType === "branch") {
-      return `${BRANCH_HL_START}${marker.highlightId}:${marker.branchNodeId}]]]`;
-    }
-    return `${TEMP_HL_START}${marker.tempId}]]]`;
-  };
-
   const splitTextWithMarkers = (value) => {
     const result = [];
     let i = 0;
@@ -356,71 +346,49 @@ const remarkBranchHighlights = () => {
     };
   };
 
-  const transformNode = (node) => {
-    if (!node || typeof node !== "object") return;
-    if (Array.isArray(node.children)) {
-      const expanded = [];
-      node.children.forEach((child) => {
-        if (child?.type === "text" && typeof child.value === "string") {
-          expanded.push(...splitTextWithMarkers(child.value));
-        } else {
-          expanded.push(child);
-        }
-      });
+  return (tree) => {
+    let activeMarker = null;
 
-      const nextChildren = [];
-      let active = null;
-      let buffer = [];
-      const pushNode = (child) => {
-        if (active) {
-          buffer.push(child);
-        } else {
-          nextChildren.push(child);
-        }
-      };
+    const transform = (node) => {
+      if (!node || typeof node !== "object") return node;
 
-      expanded.forEach((child) => {
-        if (child?.type === "highlightMarker") {
-          if (child.kind === "start" && !active) {
-            active = child;
-            buffer = [];
-            return;
-          }
-          if (
-            child.kind === "end" &&
-            active &&
-            child.highlightType === active.highlightType
-          ) {
-            if (buffer.length) {
-              nextChildren.push(makeLinkNode(active, buffer));
+      if (node.type === "text" && typeof node.value === "string") {
+        const parts = splitTextWithMarkers(node.value);
+        const newNodes = [];
+        parts.forEach((part) => {
+          if (part.type === "highlightMarker") {
+            if (part.kind === "start") {
+              activeMarker = part;
+            } else {
+              activeMarker = null;
             }
-            active = null;
-            buffer = [];
-            return;
+          } else {
+            if (activeMarker) {
+              newNodes.push(makeLinkNode(activeMarker, [part]));
+            } else {
+              newNodes.push(part);
+            }
           }
-          pushNode({ type: "text", value: markerToText(child) });
-          return;
-        }
-
-        transformNode(child);
-        pushNode(child);
-      });
-
-      if (active) {
-        nextChildren.push({ type: "text", value: markerToText(active) }, ...buffer);
+        });
+        return newNodes;
       }
 
-      node.children = nextChildren;
-      return;
-    }
+      if (node.children && Array.isArray(node.children)) {
+        const nextChildren = [];
+        for (const child of node.children) {
+          const result = transform(child);
+          if (Array.isArray(result)) {
+            nextChildren.push(...result);
+          } else {
+            nextChildren.push(result);
+          }
+        }
+        node.children = nextChildren;
+      }
+      return node;
+    };
 
-    Object.values(node).forEach((value) => {
-      if (value && typeof value === "object") transformNode(value);
-    });
-  };
-
-  return (tree) => {
-    transformNode(tree);
+    transform(tree);
   };
 };
 
@@ -610,6 +578,7 @@ const App = () => {
   const [graphScale, setGraphScale] = useState(1.4);
   const [graphTranslate, setGraphTranslate] = useState({ x: 0, y: 0 });
   const [graphHasInteracted, setGraphHasInteracted] = useState(false);
+  const [showComposerHint, setShowComposerHint] = useState(true);
   const [isTreeListCollapsed, setIsTreeListCollapsed] = useState(false);
   const [isContextModalOpen, setIsContextModalOpen] = useState(false);
   const [selectionPopover, setSelectionPopover] = useState({
@@ -989,6 +958,7 @@ const App = () => {
   useEffect(() => {
     const onKeyDown = (event) => {
       if (event.key === "Shift") {
+        if (event.metaKey || event.ctrlKey || event.altKey) return;
         const payload = getSelectionPayload();
         if (payload) {
           setSelectionPopover({
@@ -1921,7 +1891,7 @@ const App = () => {
         <div className="chat-frame">
           {isEmptyThread ? (
             <div className="chat-empty">
-              <h1 className="chat-empty-title">Where should we begin?</h1>
+              <h1 className="chat-empty-title">Let's start branching?</h1>
               {error && <div className="error-banner">{error}</div>}
               <div className="chat-input chat-input--empty">
                 <div className="selection-hint">{selectionHint}</div>
@@ -2042,7 +2012,26 @@ const App = () => {
                 {error && <div className="error-banner">{error}</div>}
               </section>
               <footer className="chat-input">
-                <div className="selection-hint">{selectionHint}</div>
+                {showComposerHint ? (
+                  <div className="selection-hint-row">
+                    <div className="selection-hint">{selectionHint}</div>
+                    <button
+                      type="button"
+                      className="selection-hint-toggle"
+                      onClick={() => setShowComposerHint(false)}
+                    >
+                      Hide
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className="selection-hint-toggle is-show"
+                    onClick={() => setShowComposerHint(true)}
+                  >
+                    Show tip
+                  </button>
+                )}
                 <div className="composer">
                   <textarea
                     ref={inputRef}
