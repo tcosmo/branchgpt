@@ -60,6 +60,11 @@ body.is-resizing {
     font-size: 20px;
 }
 
+.app-title {
+    cursor: pointer;
+    user-select: none;
+}
+
 .sidebar-title-row {
     display: flex;
     align-items: center;
@@ -813,6 +818,12 @@ body.is-resizing {
     pointer-events: none;
 }
 
+.branch-highlight.is-tip {
+    cursor: default;
+    pointer-events: none;
+    color: black;
+}
+
 .branch-highlight:hover,
 .branch-highlight.is-hovered {
     background: rgba(255, 235, 59, 0.82);
@@ -875,8 +886,9 @@ body.is-resizing {
     padding: 16px 24px 22px;
     border-top: 1px solid #242b37;
     display: flex;
-    gap: 12px;
-    align-items: flex-end;
+    flex-direction: column;
+    gap: 10px;
+    align-items: stretch;
     position: sticky;
     bottom: 0;
     background: rgba(15, 17, 21, 0.92);
@@ -948,6 +960,30 @@ body.is-resizing {
     position: relative;
     width: 100%;
     display: flex;
+}
+
+.selection-hint {
+    font-size: 12px;
+    color: #8c96aa;
+    letter-spacing: 0.01em;
+}
+
+.chat-input .selection-hint {
+    margin-bottom: 8px;
+}
+
+.graph-hint {
+    display: inline-block;
+    align-self: flex-start;
+    padding: 4px 8px;
+    margin-bottom: 6px;
+    background: rgba(15, 17, 21, 0.75);
+    border: 1px solid rgba(60, 70, 90, 0.6);
+    border-radius: 10px;
+}
+
+.chat-input--empty .selection-hint {
+    text-align: center;
 }
 
 .chat-input .send-button {

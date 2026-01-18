@@ -45,6 +45,94 @@ const normalizeGeneratedTitle = (title, fallback = "...") => {
 
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+const buildPlainTextIndex = (content) => {
+  const map = [];
+  let plain = "";
+  let i = 0;
+
+  while (i < content.length) {
+    if (content[i] === "\\") {
+      if (i + 1 < content.length) {
+        plain += content[i + 1];
+        map.push(i + 1);
+        i += 2;
+        continue;
+      }
+    }
+
+    if (content[i] === "`") {
+      let tickCount = 1;
+      while (content[i + tickCount] === "`") tickCount += 1;
+      const ticks = "`".repeat(tickCount);
+      const end = content.indexOf(ticks, i + tickCount);
+      if (end !== -1) {
+        for (let j = i + tickCount; j < end; j += 1) {
+          plain += content[j];
+          map.push(j);
+        }
+        i = end + tickCount;
+        continue;
+      }
+    }
+
+    if (content[i] === "[") {
+      const closeBracket = content.indexOf("]", i + 1);
+      if (closeBracket !== -1 && content[closeBracket + 1] === "(") {
+        const closeParen = content.indexOf(")", closeBracket + 2);
+        if (closeParen !== -1) {
+          for (let j = i + 1; j < closeBracket; j += 1) {
+            plain += content[j];
+            map.push(j);
+          }
+          i = closeParen + 1;
+          continue;
+        }
+      }
+    }
+
+    if (content.startsWith("**", i) || content.startsWith("__", i) || content.startsWith("~~", i)) {
+      i += 2;
+      continue;
+    }
+    if (content[i] === "*" || content[i] === "_") {
+      i += 1;
+      continue;
+    }
+
+    plain += content[i];
+    map.push(i);
+    i += 1;
+  }
+
+  return { plain, map };
+};
+
+const findMatchInPlainText = (content, selectedText) => {
+  if (!content || !selectedText) return null;
+  const { plain, map } = buildPlainTextIndex(content);
+  let matchIndex = plain.indexOf(selectedText);
+  let matchText = selectedText;
+
+  if (matchIndex === -1) {
+    const pattern = escapeRegex(selectedText.trim()).replace(/\s+/g, "\\s+");
+    try {
+      const re = new RegExp(pattern, "m");
+      const match = re.exec(plain);
+      if (!match || match.index == null) return null;
+      matchIndex = match.index;
+      matchText = match[0];
+    } catch {
+      return null;
+    }
+  }
+
+  if (matchIndex < 0 || !matchText) return null;
+  const startRaw = map[matchIndex];
+  const endRawIndex = map[matchIndex + matchText.length - 1];
+  if (startRaw == null || endRawIndex == null) return null;
+  return { startRaw, endRaw: endRawIndex + 1 };
+};
+
 const stripAllTempHighlights = (content) => {
   if (!content) return content;
   return content
@@ -73,18 +161,29 @@ const wrapFirstMatchWithTempHighlight = (content, selectedText, tempId) => {
   try {
     const re = new RegExp(pattern, "m");
     const match = re.exec(cleaned);
-    if (!match || match.index == null) return cleaned;
-    const matchText = match[0];
-    return (
-      cleaned.slice(0, match.index) +
-      start +
-      cleaned.slice(match.index, match.index + matchText.length) +
-      end +
-      cleaned.slice(match.index + matchText.length)
-    );
+    if (match && match.index != null) {
+      const matchText = match[0];
+      return (
+        cleaned.slice(0, match.index) +
+        start +
+        cleaned.slice(match.index, match.index + matchText.length) +
+        end +
+        cleaned.slice(match.index + matchText.length)
+      );
+    }
   } catch {
-    return cleaned;
+    // Fall through to plain-text matching.
   }
+
+  const fallbackMatch = findMatchInPlainText(cleaned, selectedText);
+  if (!fallbackMatch) return cleaned;
+  return (
+    cleaned.slice(0, fallbackMatch.startRaw) +
+    start +
+    cleaned.slice(fallbackMatch.startRaw, fallbackMatch.endRaw) +
+    end +
+    cleaned.slice(fallbackMatch.endRaw)
+  );
 };
 
 const removeTempHighlightById = (content, tempId) => {
@@ -133,86 +232,184 @@ const wrapFirstMatchWithBranchHighlight = (
   try {
     const re = new RegExp(pattern, "m");
     const match = re.exec(content);
-    if (!match || match.index == null) return content;
-    const matchText = match[0];
-    return (
-      content.slice(0, match.index) +
-      start +
-      content.slice(match.index, match.index + matchText.length) +
-      end +
-      content.slice(match.index + matchText.length)
-    );
+    if (match && match.index != null) {
+      const matchText = match[0];
+      return (
+        content.slice(0, match.index) +
+        start +
+        content.slice(match.index, match.index + matchText.length) +
+        end +
+        content.slice(match.index + matchText.length)
+      );
+    }
   } catch {
-    return content;
+    // Fall through to plain-text matching.
   }
+
+  const fallbackMatch = findMatchInPlainText(content, selectedText);
+  if (!fallbackMatch) return content;
+  return (
+    content.slice(0, fallbackMatch.startRaw) +
+    start +
+    content.slice(fallbackMatch.startRaw, fallbackMatch.endRaw) +
+    end +
+    content.slice(fallbackMatch.endRaw)
+  );
 };
 
 const remarkBranchHighlights = () => {
+  const markerToText = (marker) => {
+    if (marker.kind === "end") {
+      return marker.highlightType === "branch" ? BRANCH_HL_END : TEMP_HL_END;
+    }
+    if (marker.highlightType === "branch") {
+      return `${BRANCH_HL_START}${marker.highlightId}:${marker.branchNodeId}]]]`;
+    }
+    return `${TEMP_HL_START}${marker.tempId}]]]`;
+  };
+
+  const splitTextWithMarkers = (value) => {
+    const result = [];
+    let i = 0;
+    const pushText = (text) => {
+      if (text) result.push({ type: "text", value: text });
+    };
+
+    while (i < value.length) {
+      const candidates = [
+        { kind: "branch-start", token: BRANCH_HL_START, index: value.indexOf(BRANCH_HL_START, i) },
+        { kind: "temp-start", token: TEMP_HL_START, index: value.indexOf(TEMP_HL_START, i) },
+        { kind: "branch-end", token: BRANCH_HL_END, index: value.indexOf(BRANCH_HL_END, i) },
+        { kind: "temp-end", token: TEMP_HL_END, index: value.indexOf(TEMP_HL_END, i) },
+      ].filter((entry) => entry.index !== -1);
+
+      if (!candidates.length) {
+        pushText(value.slice(i));
+        break;
+      }
+
+      candidates.sort((a, b) => a.index - b.index);
+      const next = candidates[0];
+      if (next.index > i) {
+        pushText(value.slice(i, next.index));
+      }
+
+      if (next.kind === "branch-end" || next.kind === "temp-end") {
+        result.push({
+          type: "highlightMarker",
+          kind: "end",
+          highlightType: next.kind === "branch-end" ? "branch" : "temp",
+        });
+        i = next.index + next.token.length;
+        continue;
+      }
+
+      const metaEndIdx = value.indexOf("]]]", next.index);
+      if (metaEndIdx === -1) {
+        pushText(value.slice(next.index));
+        break;
+      }
+      const meta = value.slice(next.index + next.token.length, metaEndIdx);
+      if (next.kind === "branch-start") {
+        const [highlightId, branchNodeId] = meta.split(":");
+        if (highlightId && branchNodeId) {
+          result.push({
+            type: "highlightMarker",
+            kind: "start",
+            highlightType: "branch",
+            highlightId,
+            branchNodeId,
+          });
+        } else {
+          pushText(value.slice(next.index, metaEndIdx + 3));
+        }
+      } else {
+        if (meta) {
+          result.push({
+            type: "highlightMarker",
+            kind: "start",
+            highlightType: "temp",
+            tempId: meta,
+          });
+        } else {
+          pushText(value.slice(next.index, metaEndIdx + 3));
+        }
+      }
+      i = metaEndIdx + 3;
+    }
+
+    return result;
+  };
+
+  const makeLinkNode = (marker, children) => {
+    if (marker.highlightType === "branch") {
+      return {
+        type: "link",
+        url: `branch-highlight:${marker.highlightId}:${marker.branchNodeId}`,
+        children,
+      };
+    }
+    return {
+      type: "link",
+      url: `temp-highlight:${marker.tempId}`,
+      children,
+    };
+  };
+
   const transformNode = (node) => {
     if (!node || typeof node !== "object") return;
     if (Array.isArray(node.children)) {
-      const nextChildren = [];
+      const expanded = [];
       node.children.forEach((child) => {
         if (child?.type === "text" && typeof child.value === "string") {
-          let value = child.value;
-          while (true) {
-            const branchIdx = value.indexOf(BRANCH_HL_START);
-            const tempIdx = value.indexOf(TEMP_HL_START);
-            const startIdx =
-              branchIdx === -1
-                ? tempIdx
-                : tempIdx === -1
-                  ? branchIdx
-                  : Math.min(branchIdx, tempIdx);
-            if (startIdx === -1) break;
-            const isBranch = startIdx === branchIdx;
-            const metaEndIdx = value.indexOf("]]]", startIdx);
-            if (metaEndIdx === -1) break;
-            const meta = value.slice(
-              startIdx + (isBranch ? BRANCH_HL_START.length : TEMP_HL_START.length),
-              metaEndIdx,
-            );
-            const contentStartIdx = metaEndIdx + 3;
-            const endIdx = value.indexOf(isBranch ? BRANCH_HL_END : TEMP_HL_END, contentStartIdx);
-            if (endIdx === -1) break;
+          expanded.push(...splitTextWithMarkers(child.value));
+        } else {
+          expanded.push(child);
+        }
+      });
 
-            const before = value.slice(0, startIdx);
-            const inside = value.slice(contentStartIdx, endIdx);
-            const after = value.slice(
-              endIdx + (isBranch ? BRANCH_HL_END.length : TEMP_HL_END.length),
-            );
+      const nextChildren = [];
+      let active = null;
+      let buffer = [];
+      const pushNode = (child) => {
+        if (active) {
+          buffer.push(child);
+        } else {
+          nextChildren.push(child);
+        }
+      };
 
-            if (before) nextChildren.push({ type: "text", value: before });
-            if (isBranch) {
-              const [highlightId, branchNodeId] = meta.split(":");
-              if (!highlightId || !branchNodeId) break;
-              nextChildren.push({
-                type: "link",
-                url: `branch-highlight:${highlightId}:${branchNodeId}`,
-                children: [{ type: "text", value: inside }],
-              });
-            } else {
-              const tempId = meta;
-              if (!tempId) break;
-              nextChildren.push({
-                type: "link",
-                url: `temp-highlight:${tempId}`,
-                children: [{ type: "text", value: inside }],
-              });
+      expanded.forEach((child) => {
+        if (child?.type === "highlightMarker") {
+          if (child.kind === "start" && !active) {
+            active = child;
+            buffer = [];
+            return;
+          }
+          if (
+            child.kind === "end" &&
+            active &&
+            child.highlightType === active.highlightType
+          ) {
+            if (buffer.length) {
+              nextChildren.push(makeLinkNode(active, buffer));
             }
-
-            value = after;
+            active = null;
+            buffer = [];
+            return;
           }
-
-          if (value) {
-            nextChildren.push({ ...child, value });
-          }
+          pushNode({ type: "text", value: markerToText(child) });
           return;
         }
 
         transformNode(child);
-        nextChildren.push(child);
+        pushNode(child);
       });
+
+      if (active) {
+        nextChildren.push({ type: "text", value: markerToText(active) }, ...buffer);
+      }
+
       node.children = nextChildren;
       return;
     }
@@ -287,12 +484,7 @@ const loadTreesFromStorage = () => {
     const parsed = JSON.parse(raw);
     if (parsed?.version !== 1) return null;
     if (!parsed.treesById || typeof parsed.treesById !== "object") return null;
-    const treeIds = Object.keys(parsed.treesById);
-    if (!treeIds.length) return null;
-    const activeTreeId = parsed.activeTreeId && parsed.treesById[parsed.activeTreeId]
-      ? parsed.activeTreeId
-      : treeIds[0];
-    return { treesById: parsed.treesById, activeTreeId };
+    return { treesById: parsed.treesById, activeTreeId: null };
   } catch {
     return null;
   }
@@ -301,8 +493,7 @@ const loadTreesFromStorage = () => {
 const createInitialTreeState = () => {
   const loaded = loadTreesFromStorage();
   if (loaded) return loaded;
-  const tree = createTree("New Tree");
-  return { treesById: { [tree.id]: tree }, activeTreeId: tree.id };
+  return { treesById: {}, activeTreeId: null };
 };
 
 const getSvgViewport = (containerRect, viewBoxWidth, viewBoxHeight) => {
@@ -459,14 +650,23 @@ const App = () => {
     startWidth: 0,
   });
 
-  const activeTree = treesById[activeTreeId];
+  const activeTree = activeTreeId ? treesById[activeTreeId] : null;
   const nodesById = activeTree?.nodesById || {};
-  const activeNodeId = activeTree?.activeNodeId || "root";
+  const activeNodeId = activeTree?.activeNodeId ?? null;
   const activeNode = nodesById[activeNodeId];
-  const isEmptyThread = (activeNode?.messages?.length ?? 0) === 0;
-  const shouldShowContext = activeNodeId !== "root";
+  const hasActiveTree = Boolean(activeTreeId && activeTree);
+  const isEmptyThread = !hasActiveTree || (activeNode?.messages?.length ?? 0) === 0;
+  const shouldShowContext = Boolean(activeNodeId && activeNodeId !== "root");
   const parentNodeId = activeNode?.parentId || null;
   const parentNode = parentNodeId ? nodesById[parentNodeId] : null;
+  const assistantModelLabel = MODEL.replace(/^gpt/i, "GPT");
+  const assistantLabel = `Assistant (${assistantModelLabel})`;
+  const selectionHint = (
+    <>
+      Tip: Highlight text, then press{" "}
+      <span className="branch-highlight is-tip">Shift</span> to create a new branch.
+    </>
+  );
   const childrenMap = useMemo(() => buildChildrenMap(nodesById), [nodesById]);
   const treeList = useMemo(
     () => Object.values(treesById).sort((a, b) => a.createdAt - b.createdAt),
@@ -657,6 +857,7 @@ const App = () => {
   };
 
   const setActiveNodeId = (nodeId) => {
+    if (!activeTreeId) return;
     updateTree(activeTreeId, (tree) => ({ ...tree, activeNodeId: nodeId }));
   };
 
@@ -705,13 +906,9 @@ const App = () => {
 
     const remaining = treeList.filter((t) => t.id !== treeId);
 
-    // Important: never leave `activeTreeId` as null even briefly; the render path assumes
-    // an active tree exists and will crash (black screen) otherwise.
     if (!remaining.length) {
-      const fresh = createTree("New Tree");
-      setTreesById({ [fresh.id]: fresh });
-      setActiveTreeId(fresh.id);
-      setTreeView("graph");
+      setTreesById({});
+      setActiveTreeId(null);
     } else {
       setTreesById((prev) => {
         const next = { ...prev };
@@ -719,7 +916,7 @@ const App = () => {
         return next;
       });
       if (activeTreeId === treeId) {
-        setActiveTreeId(remaining[0].id);
+        setActiveTreeId(null);
       }
     }
 
@@ -837,13 +1034,6 @@ const App = () => {
   }, [selectionPopover.visible, activeNodeId, activeTreeId, tempHighlight]);
 
   useEffect(() => {
-    if (activeTreeId) return;
-    if (!treeList.length) return;
-    setActiveTreeId(treeList[0].id);
-  }, [activeTreeId, treeList]);
-
-  useEffect(() => {
-    if (!activeTreeId) return;
     if (tempHighlight) {
       updateNodeMessages(tempHighlight.treeId, tempHighlight.nodeId, (messages) =>
         messages.map((m, i) => {
@@ -1007,18 +1197,25 @@ const App = () => {
 
   const handleSend = async (content) => {
     if (!content.trim() || isLoading) return;
-    if (!activeTreeId) return;
     setError("");
     const trimmed = content.trim();
-    const nodeSnapshot = nodesById[activeNodeId];
-    const treeIdSnapshot = activeTreeId;
-    const treeSnapshot = treesById[treeIdSnapshot];
+    let treeIdSnapshot = activeTreeId;
+    let treeSnapshot = treeIdSnapshot ? treesById[treeIdSnapshot] : null;
+    if (!treeSnapshot) {
+      const freshTree = createTree("New Tree");
+      setTreesById((prev) => ({ ...prev, [freshTree.id]: freshTree }));
+      setActiveTreeId(freshTree.id);
+      treeIdSnapshot = freshTree.id;
+      treeSnapshot = freshTree;
+    }
+    const nodeIdSnapshot = treeSnapshot.activeNodeId;
+    const nodeSnapshot = treeSnapshot.nodesById[nodeIdSnapshot];
     const isFirstRootTurn =
-      activeNodeId === "root" && (nodeSnapshot?.messages?.length ?? 0) === 0;
-    const hiddenContext = shouldShowContext
-      ? buildHiddenContextForNode(activeNodeId, nodesById)
+      nodeIdSnapshot === "root" && (nodeSnapshot?.messages?.length ?? 0) === 0;
+    const hiddenContext = nodeIdSnapshot && nodeIdSnapshot !== "root"
+      ? buildHiddenContextForNode(nodeIdSnapshot, treeSnapshot.nodesById)
       : "";
-    updateNodeMessages(activeTreeId, activeNodeId, (messages) => [
+    updateNodeMessages(treeIdSnapshot, nodeIdSnapshot, (messages) => [
       ...messages,
       { role: "user", content: trimmed },
     ]);
@@ -1059,7 +1256,7 @@ const App = () => {
       }
 
       const reply = await replyPromise;
-      updateNodeMessages(activeTreeId, activeNodeId, (messages) => [
+      updateNodeMessages(treeIdSnapshot, nodeIdSnapshot, (messages) => [
         ...messages,
         { role: "assistant", content: reply || "No response returned." },
       ]);
@@ -1327,6 +1524,36 @@ const App = () => {
   }, [draft]);
 
   useEffect(() => {
+    if (!selectionPopover.visible) return;
+    setHoveredBranchNodeId(null);
+  }, [selectionPopover.visible]);
+
+  useEffect(() => {
+    if (!hoveredBranchNodeId) return;
+    const clearHoverIfOutside = (event) => {
+      const target = event?.target;
+      if (!(target instanceof Element)) {
+        setHoveredBranchNodeId(null);
+        return;
+      }
+      const hoverable = target.closest(".branch-highlight, .tree-item, .graph-node");
+      if (!hoverable) {
+        setHoveredBranchNodeId(null);
+      }
+    };
+    const clearHover = () => setHoveredBranchNodeId(null);
+
+    window.addEventListener("pointermove", clearHoverIfOutside);
+    window.addEventListener("scroll", clearHover, true);
+    window.addEventListener("blur", clearHover);
+    return () => {
+      window.removeEventListener("pointermove", clearHoverIfOutside);
+      window.removeEventListener("scroll", clearHover, true);
+      window.removeEventListener("blur", clearHover);
+    };
+  }, [hoveredBranchNodeId]);
+
+  useEffect(() => {
     const handleMove = (event) => {
       if (panStateRef.current.active) {
         const container = graphContainerRef.current;
@@ -1485,20 +1712,39 @@ const App = () => {
         <div className="sidebar-header">
           <div className="sidebar-title-row">
             <div>
-              <h1>Chat Tree</h1>
+              <h1
+                className="app-title"
+                role="button"
+                tabIndex={0}
+                onClick={() => {
+                  setActiveTreeId(null);
+                  closeTreeMenu();
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  event.preventDefault();
+                  setActiveTreeId(null);
+                  closeTreeMenu();
+                }}
+                title="Show all trees"
+              >
+                BranchGPT
+              </h1>
               <p >
                 {treeList.length} {treeList.length === 1 ? "tree" : "trees"}
               </p>
             </div>
             <div className="sidebar-actions">
-              <button
-                type="button"
-                className="collapse-tree-button"
-                onClick={() => setIsTreeListCollapsed((prev) => !prev)}
-                title={isTreeListCollapsed ? "Show all trees" : "Show only active tree"}
-              >
-                {isTreeListCollapsed ? "Show all" : "Only active"}
-              </button>
+              {treeList.length > 1 && (
+                <button
+                  type="button"
+                  className="collapse-tree-button"
+                  onClick={() => setIsTreeListCollapsed((prev) => !prev)}
+                  title={isTreeListCollapsed ? "Show all trees" : "Show only active tree"}
+                >
+                  {isTreeListCollapsed ? "Show trees" : "Hide trees"}
+                </button>
+              )}
               <button
                 type="button"
                 className="new-tree-button"
@@ -1547,122 +1793,128 @@ const App = () => {
             })}
           </div>
 
-          <div className="view-toggle">
-            <button
-              type="button"
-              className={treeView === "graph" ? "active" : ""}
-              onClick={() => setTreeView("graph")}
-              aria-label="Graph view"
-              title="Graph view"
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <circle cx="6" cy="6" r="2.5" />
-                <circle cx="18" cy="6" r="2.5" />
-                <circle cx="12" cy="18" r="2.5" />
-                <path d="M8 6h8M7.5 7.5l3.5 8M16.5 7.5l-3.5 8" />
-              </svg>
-            </button>
-            <button
-              type="button"
-              className={treeView === "list" ? "active" : ""}
-              onClick={() => setTreeView("list")}
-              aria-label="List view"
-              title="List view"
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M4 6h16M4 12h16M4 18h16" />
-              </svg>
-            </button>
-          </div>
-        </div>
-        {treeView === "graph" ? (
-          <div
-            className="tree-graph"
-            ref={graphContainerRef}
-            onWheel={handleGraphWheel}
-            onMouseDown={handleGraphMouseDown}
-          >
-            <svg
-              width="100%"
-              height="100%"
-              viewBox={`0 0 ${graphLayout.width} ${graphLayout.height}`}
-              preserveAspectRatio="xMidYMin meet"
-            >
-              <g
-                transform={`translate(${graphTranslate.x} ${graphTranslate.y}) scale(${graphScale})`}
+          {hasActiveTree && (
+            <div className="view-toggle">
+              <button
+                type="button"
+                className={treeView === "graph" ? "active" : ""}
+                onClick={() => setTreeView("graph")}
+                aria-label="Graph view"
+                title="Graph view"
               >
-                {graphLayout.edges.map((edge) => {
-                  const from = graphLayout.positions[edge.from];
-                  const to = graphLayout.positions[edge.to];
-                  if (!from || !to) return null;
-                  return (
-                    <line
-                      key={`${edge.from}-${edge.to}`}
-                      x1={from.x}
-                      y1={from.y}
-                      x2={to.x}
-                      y2={to.y}
-                      className="graph-edge"
-                    />
-                  );
-                })}
-                {Object.entries(graphLayout.positions).map(([nodeId, pos]) => {
-                  const node = nodesById[nodeId];
-                  if (!node) return null;
-                  const words = (node.title || "").split(" ").filter(Boolean);
-                  const isPending = node?.requestStatus === "pending";
-                  const isReady = node?.hasUnread;
-                  return (
-                    <g
-                      key={nodeId}
-                      className={`graph-node ${nodeId === activeNodeId ? "active" : ""
-                        } ${hoveredBranchNodeId === nodeId ? "branch-hover" : ""}`}
-                      onClick={() => setActiveNodeId(nodeId)}
-                      onMouseEnter={() => setHoveredBranchNodeId(nodeId)}
-                      onMouseLeave={() => setHoveredBranchNodeId(null)}
-                    >
-                      <circle cx={pos.x} cy={pos.y} r="34" />
-                      {isPending && (
-                        <circle
-                          className="graph-node-badge pending"
-                          cx={pos.x + 22}
-                          cy={pos.y - 22}
-                          r="6"
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="6" cy="6" r="2.5" />
+                  <circle cx="18" cy="6" r="2.5" />
+                  <circle cx="12" cy="18" r="2.5" />
+                  <path d="M8 6h8M7.5 7.5l3.5 8M16.5 7.5l-3.5 8" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                className={treeView === "list" ? "active" : ""}
+                onClick={() => setTreeView("list")}
+                aria-label="List view"
+                title="List view"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+              </button>
+            </div>
+          )}
+        </div>
+        {hasActiveTree &&
+          (treeView === "graph" ? (
+            <>
+
+              <div
+                className="tree-graph"
+                ref={graphContainerRef}
+                onWheel={handleGraphWheel}
+                onMouseDown={handleGraphMouseDown}
+              >
+                <svg
+                  width="100%"
+                  height="100%"
+                  viewBox={`0 0 ${graphLayout.width} ${graphLayout.height}`}
+                  preserveAspectRatio="xMidYMin meet"
+                >
+                  <g
+                    transform={`translate(${graphTranslate.x} ${graphTranslate.y}) scale(${graphScale})`}
+                  >
+                    {graphLayout.edges.map((edge) => {
+                      const from = graphLayout.positions[edge.from];
+                      const to = graphLayout.positions[edge.to];
+                      if (!from || !to) return null;
+                      return (
+                        <line
+                          key={`${edge.from}-${edge.to}`}
+                          x1={from.x}
+                          y1={from.y}
+                          x2={to.x}
+                          y2={to.y}
+                          className="graph-edge"
                         />
-                      )}
-                      {!isPending && isReady && (
-                        <circle
-                          className="graph-node-badge ready"
-                          cx={pos.x + 22}
-                          cy={pos.y - 22}
-                          r="6"
-                        />
-                      )}
-                      <text x={pos.x} y={pos.y} textAnchor="middle">
-                        {words.length > 1 ? (
-                          <>
-                            <tspan x={pos.x} dy="-6">
-                              {words[0]}
-                            </tspan>
-                            <tspan x={pos.x} dy="14">
-                              {words.slice(1).join(" ")}
-                            </tspan>
-                          </>
-                        ) : (
-                          <tspan x={pos.x} dy="4">
-                            {words[0]}
-                          </tspan>
-                        )}
-                      </text>
-                    </g>
-                  );
-                })}
-              </g>
-            </svg>
-          </div>
-        ) : (
-          <div className="tree">{renderTree("root")}</div>
-        )}
+                      );
+                    })}
+                    {Object.entries(graphLayout.positions).map(([nodeId, pos]) => {
+                      const node = nodesById[nodeId];
+                      if (!node) return null;
+                      const words = (node.title || "").split(" ").filter(Boolean);
+                      const isPending = node?.requestStatus === "pending";
+                      const isReady = node?.hasUnread;
+                      return (
+                        <g
+                          key={nodeId}
+                          className={`graph-node ${nodeId === activeNodeId ? "active" : ""
+                            } ${hoveredBranchNodeId === nodeId ? "branch-hover" : ""}`}
+                          onClick={() => setActiveNodeId(nodeId)}
+                          onMouseEnter={() => setHoveredBranchNodeId(nodeId)}
+                          onMouseLeave={() => setHoveredBranchNodeId(null)}
+                        >
+                          <circle cx={pos.x} cy={pos.y} r="34" />
+                          {isPending && (
+                            <circle
+                              className="graph-node-badge pending"
+                              cx={pos.x + 22}
+                              cy={pos.y - 22}
+                              r="6"
+                            />
+                          )}
+                          {!isPending && isReady && (
+                            <circle
+                              className="graph-node-badge ready"
+                              cx={pos.x + 22}
+                              cy={pos.y - 22}
+                              r="6"
+                            />
+                          )}
+                          <text x={pos.x} y={pos.y} textAnchor="middle">
+                            {words.length > 1 ? (
+                              <>
+                                <tspan x={pos.x} dy="-6">
+                                  {words[0]}
+                                </tspan>
+                                <tspan x={pos.x} dy="14">
+                                  {words.slice(1).join(" ")}
+                                </tspan>
+                              </>
+                            ) : (
+                              <tspan x={pos.x} dy="4">
+                                {words[0]}
+                              </tspan>
+                            )}
+                          </text>
+                        </g>
+                      );
+                    })}
+                  </g>
+                </svg>
+              </div>
+            </>
+          ) : (
+            <div className="tree">{renderTree("root")}</div>
+          ))}
       </aside>
       <div className="sidebar-resizer" onMouseDown={handleResizerMouseDown} />
       <main className="chat">
@@ -1672,6 +1924,7 @@ const App = () => {
               <h1 className="chat-empty-title">Where should we begin?</h1>
               {error && <div className="error-banner">{error}</div>}
               <div className="chat-input chat-input--empty">
+                <div className="selection-hint">{selectionHint}</div>
                 <div className="composer">
                   <textarea
                     ref={inputRef}
@@ -1698,6 +1951,7 @@ const App = () => {
                     </svg>
                   </button>
                 </div>
+
               </div>
             </div>
           ) : (
@@ -1757,7 +2011,7 @@ const App = () => {
                     data-message-index={index}
                   >
                     <div className="message-role">
-                      {message.role === "user" ? "You" : "Assistant"}
+                      {message.role === "user" ? "You" : assistantLabel}
                     </div>
                     <div className="message-content">
                       <ReactMarkdown
@@ -1779,7 +2033,7 @@ const App = () => {
                 ))}
                 {isLoading && (
                   <div className="message assistant message--thinking">
-                    <div className="message-role">Assistant</div>
+                    <div className="message-role">{assistantLabel}</div>
                     <div className="message-content">
                       <span className="thinking">Thinking...</span>
                     </div>
@@ -1788,6 +2042,7 @@ const App = () => {
                 {error && <div className="error-banner">{error}</div>}
               </section>
               <footer className="chat-input">
+                <div className="selection-hint">{selectionHint}</div>
                 <div className="composer">
                   <textarea
                     ref={inputRef}
@@ -1814,6 +2069,7 @@ const App = () => {
                     </svg>
                   </button>
                 </div>
+
               </footer>
             </>
           )}
