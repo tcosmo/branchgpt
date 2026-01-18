@@ -409,6 +409,8 @@ const App = () => {
   const [treesById, setTreesById] = useState(initialTreeState.treesById);
   const [activeTreeId, setActiveTreeId] = useState(initialTreeState.activeTreeId);
   const [hoveredBranchNodeId, setHoveredBranchNodeId] = useState(null);
+  const [pendingTeleport, setPendingTeleport] = useState(null);
+  const [flashBranchNodeId, setFlashBranchNodeId] = useState(null);
   const [draft, setDraft] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
@@ -463,6 +465,8 @@ const App = () => {
   const activeNode = nodesById[activeNodeId];
   const isEmptyThread = (activeNode?.messages?.length ?? 0) === 0;
   const shouldShowContext = activeNodeId !== "root";
+  const parentNodeId = activeNode?.parentId || null;
+  const parentNode = parentNodeId ? nodesById[parentNodeId] : null;
   const childrenMap = useMemo(() => buildChildrenMap(nodesById), [nodesById]);
   const treeList = useMemo(
     () => Object.values(treesById).sort((a, b) => a.createdAt - b.createdAt),
@@ -496,10 +500,12 @@ const App = () => {
           const branchNodeId = parts[2];
           const disableHoverEffects = selectionPopover.visible;
           const isHovered = !disableHoverEffects && hoveredBranchNodeId === branchNodeId;
+          const isTeleportFlash = flashBranchNodeId === branchNodeId;
           return (
             <span
               {...props}
               className={`branch-highlight ${disableHoverEffects ? "no-hover" : ""} ${isHovered ? "is-hovered" : ""
+                } ${isTeleportFlash ? "teleport-flash" : ""
                 }`}
               data-highlight-id={highlightId}
               data-branch-node-id={branchNodeId}
@@ -564,7 +570,7 @@ const App = () => {
         );
       },
     }),
-    [hoveredBranchNodeId, selectionPopover.visible],
+    [flashBranchNodeId, hoveredBranchNodeId, selectionPopover.visible],
   );
   const graphLayout = useMemo(() => {
     const positions = {};
@@ -654,6 +660,12 @@ const App = () => {
     updateTree(activeTreeId, (tree) => ({ ...tree, activeNodeId: nodeId }));
   };
 
+  const teleportToParentHighlight = () => {
+    if (!parentNodeId) return;
+    setPendingTeleport({ parentNodeId, childNodeId: activeNodeId });
+    setActiveNodeId(parentNodeId);
+  };
+
   const createNewTree = () => {
     const tree = createTree("New Tree");
     setTreesById((prev) => ({ ...prev, [tree.id]: tree }));
@@ -691,28 +703,27 @@ const App = () => {
     const ok = window.confirm(`Delete "${tree.title}"? This cannot be undone.`);
     if (!ok) return;
 
-    setTreesById((prev) => {
-      const next = { ...prev };
-      delete next[treeId];
-      const remainingIds = Object.keys(next);
-      if (!remainingIds.length) {
-        const fresh = createTree("New Tree");
-        next[fresh.id] = fresh;
-      }
-      return next;
-    });
+    const remaining = treeList.filter((t) => t.id !== treeId);
 
-    closeTreeMenu();
-
-    if (activeTreeId === treeId) {
-      const remaining = treeList.filter((t) => t.id !== treeId);
-      if (remaining.length) {
+    // Important: never leave `activeTreeId` as null even briefly; the render path assumes
+    // an active tree exists and will crash (black screen) otherwise.
+    if (!remaining.length) {
+      const fresh = createTree("New Tree");
+      setTreesById({ [fresh.id]: fresh });
+      setActiveTreeId(fresh.id);
+      setTreeView("graph");
+    } else {
+      setTreesById((prev) => {
+        const next = { ...prev };
+        delete next[treeId];
+        return next;
+      });
+      if (activeTreeId === treeId) {
         setActiveTreeId(remaining[0].id);
-      } else {
-        // Will be set by the activeTreeId/treeList effect after state update.
-        setActiveTreeId(null);
       }
     }
+
+    closeTreeMenu();
   };
 
   const requestTreeTitle = async (userMessage, assistantMessage = "") => {
@@ -1353,6 +1364,33 @@ const App = () => {
     };
   }, [sidebarWidth]);
 
+  useLayoutEffect(() => {
+    if (!pendingTeleport) return;
+    if (activeNodeId !== pendingTeleport.parentNodeId) return;
+
+    const container = chatAreaRef.current;
+    if (!container) {
+      setPendingTeleport(null);
+      return;
+    }
+
+    // Wait a frame so the parent node messages/highlights are in the DOM.
+    const raf = window.requestAnimationFrame(() => {
+      const selector = `[data-branch-node-id="${pendingTeleport.childNodeId}"]`;
+      const highlightEl = container.querySelector(selector);
+      if (highlightEl) {
+        highlightEl.scrollIntoView({ behavior: "smooth", block: "center" });
+        setFlashBranchNodeId(pendingTeleport.childNodeId);
+        window.setTimeout(() => {
+          setFlashBranchNodeId(null);
+        }, 1200);
+      }
+      setPendingTeleport(null);
+    });
+
+    return () => window.cancelAnimationFrame(raf);
+  }, [activeNodeId, pendingTeleport]);
+
   const handleGraphWheel = (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -1570,7 +1608,8 @@ const App = () => {
                 })}
                 {Object.entries(graphLayout.positions).map(([nodeId, pos]) => {
                   const node = nodesById[nodeId];
-                  const words = node.title.split(" ").filter(Boolean);
+                  if (!node) return null;
+                  const words = (node.title || "").split(" ").filter(Boolean);
                   const isPending = node?.requestStatus === "pending";
                   const isReady = node?.hasUnread;
                   return (
@@ -1665,10 +1704,28 @@ const App = () => {
             <>
               <header className="chat-header">
                 <div>
-                  <h2>{activeNode.title}</h2>
-                  <span className="chat-meta">
-                    {activeNode.messages.length} messages
-                  </span>
+                  <h2>{activeNode?.title ?? "Root"}</h2>
+                  <div className="chat-subhead">
+                    <span className="chat-meta">
+                      {activeNode.messages.length} messages
+                    </span>
+                    {parentNodeId && parentNode && (
+                      <button
+                        type="button"
+                        className="teleport-button"
+                        onClick={teleportToParentHighlight}
+                        title={`Jump back to the highlight in "${parentNode.title}" that created this branch`}
+                        aria-label="Jump to parent highlight"
+                      >
+                        <span className="teleport-button-label">
+                          Jump to parent highlight
+                        </span>
+                        <span className="teleport-button-parent">
+                          {parentNode.title}
+                        </span>
+                      </button>
+                    )}
+                  </div>
                 </div>
                 {shouldShowContext && (
                   <div className="chat-header-actions">

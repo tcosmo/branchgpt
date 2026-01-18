@@ -1627,7 +1627,99 @@ why did you add "do not repeat verbatim unless asked)"
 
 _**Agent (model gpt-5.2, mode Agent)**_
 
+I added **“do not repeat verbatim unless asked”** as a safety/UX guardrail so the model is less likely to paste the hidden context (especially the highlighted excerpt and ancestor snippets) back into the visible chat by default.
 
+If you don’t want that instruction, we can remove or soften it (e.g. “use as background context”).
+
+---
+
+_**User (2026-01-18 16:02Z)**_
+
+Within the same node, what amount of context is sent from question to question?
+
+---
+
+_**Agent (model gpt-5.2, mode Ask)**_
+
+I’m going to confirm exactly what `handleSend` passes into `sendToOpenAI` now (messages + any hidden context), and whether anything trims/summarizes. I’ll just read the relevant parts of `src/App.jsx` and answer precisely.
+
+---
+
+<tool-use data-tool-type="read" data-tool-name="read_file">
+<details><summary>Tool use: **read_file** • Read file: /Users/cosmo/Documents/projects/trees/src/App.jsx</summary>
+
+</details>
+</tool-use>
+
+---
+
+<tool-use data-tool-type="search" data-tool-name="grep">
+<details>
+<summary>Tool use: **grep** • Grep for "const handleSend\s*=|sendToOpenAI\(|shouldShowContext|nodeSnapshot" in "/Users/cosmo/Documents/projects/trees/src/App.jsx" • 14 matches</summary>
+
+Output mode: content
+
+
+| File | Content | Line |
+|------|------|------|
+| `src/App.jsx` | `const shouldShowContext = activeNodeId !== "root";` | L562 |
+| `src/App.jsx` | `return sendToOpenAI([\{ role: "user", content: prompt \}]);` | L845 |
+| `src/App.jsx` | `if (!shouldShowContext && isContextModalOpen) \{` | L1046 |
+| `src/App.jsx` | `\}, [shouldShowContext, isContextModalOpen]);` | L1049 |
+| `src/App.jsx` | `return sendToOpenAI([\{ role: "user", content: prompt \}]);` | L1123 |
+| `src/App.jsx` | `const handleSend = async (content) => \{` | L1126 |
+| `src/App.jsx` | `const nodeSnapshot = nodesById[activeNodeId];` | L1131 |
+| `src/App.jsx` | `activeNodeId === "root" && (nodeSnapshot?.messages?.length ?? 0) === 0;` | L1135 |
+| `src/App.jsx` | `const hiddenContext = shouldShowContext` | L1136 |
+| `src/App.jsx` | `const replyPromise = sendToOpenAI(` | L1154 |
+| `src/App.jsx` | `[...(nodeSnapshot?.messages ?? []), \{ role: "user", content: trimmed \}],` | L1155 |
+| `src/App.jsx` | `const replyPromise = sendToOpenAI([\{ role: "user", content: userMessage \}], hiddenContext);` | L1297 |
+| `src/App.jsx` | `\{shouldShowContext && (` | L1849 |
+| `src/App.jsx` | `\{shouldShowContext && isContextModalOpen && (` | L1941 |
+
+
+</details>
+</tool-use>
+
+---
+
+<tool-use data-tool-type="search" data-tool-name="grep">
+<details>
+<summary>Tool use: **grep** • Grep for "messages:\s*\[\.\.\.systemMessages, \.\.\.messages\]" in "/Users/cosmo/Documents/projects/trees/src/App.jsx" • 1 match</summary>
+
+Output mode: content
+
+
+| File | Content | Line |
+|------|------|------|
+| `src/App.jsx` | `messages: [...systemMessages, ...messages],` | L1099 |
+
+
+</details>
+</tool-use>
+
+---
+
+<tool-use data-tool-type="read" data-tool-name="read_file">
+<details><summary>Tool use: **read_file** • Read file: /Users/cosmo/Documents/projects/trees/src/App.jsx</summary>
+
+</details>
+</tool-use>
+
+---
+
+Within the **same node**, each new question sends **the entire message history of that node** (all prior `node.messages`), **plus the new user message**—there’s **no truncation/summarization** implemented.
+
+For **non-root nodes only**, it also sends **one extra hidden system message** (breadcrumb + highlight excerpt + a few ancestor tail messages). Root sends **no hidden context**.
+
+Source:
+
+```1167:1170:/Users/cosmo/Documents/projects/trees/src/App.jsx
+const replyPromise = sendToOpenAI(
+  [...(nodeSnapshot?.messages ?? []), { role: "user", content: trimmed }],
+  hiddenContext,
+);
+```
 
 ---
 

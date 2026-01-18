@@ -482,9 +482,58 @@ body.is-resizing {
     margin: 0 0 4px;
 }
 
+.chat-subhead {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
 .chat-meta {
     color: #9aa3b2;
     font-size: 12px;
+}
+
+.teleport-button {
+    border: 1px solid #2c3546;
+    background: rgba(255, 255, 255, 0.03);
+    color: #e6e9ef;
+    border-radius: 9999px;
+    padding: 6px 10px;
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    cursor: pointer;
+    transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+
+.teleport-button:hover {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: #3c465a;
+    transform: translateY(-1px);
+}
+
+.teleport-button:active {
+    transform: translateY(0);
+}
+
+.teleport-button:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(255, 235, 59, 0.22);
+}
+
+.teleport-button-label {
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.teleport-button-parent {
+    font-size: 12px;
+    color: #9aa3b2;
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .thinking {
@@ -773,6 +822,24 @@ body.is-resizing {
 .branch-highlight.no-hover:hover {
     background: rgba(255, 235, 59, 0.55);
     box-shadow: none;
+}
+
+.branch-highlight.teleport-flash {
+    animation: teleportPulse 900ms ease-out 1;
+}
+
+@keyframes teleportPulse {
+    0% {
+        box-shadow: 0 0 0 0 rgba(255, 235, 59, 0.0);
+    }
+
+    18% {
+        box-shadow: 0 0 0 4px rgba(255, 235, 59, 0.35);
+    }
+
+    100% {
+        box-shadow: 0 0 0 0 rgba(255, 235, 59, 0.0);
+    }
 }
 
 .chat-area ::selection {
