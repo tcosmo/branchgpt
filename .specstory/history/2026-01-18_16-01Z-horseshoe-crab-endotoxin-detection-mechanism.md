@@ -902,7 +902,28 @@ Status: **completed**
 
 ---
 
+<tool-use data-tool-type="generic" data-tool-name="read_lints">
+<details>
+          <summary>Tool use: **read_lints** • Read lints for 1 file</summary>
+      
+Lint paths:
 
+- `/Users/cosmo/Documents/projects/trees/src/styles.css`
+
+Lint results
+
+
+**No lint errors found**
+</details>
+</tool-use>
+
+---
+
+Removed the focus outline/ring on the main chat input textarea.
+
+Updated `src/styles.css` with:
+
+- `.chat-input textarea:focus, .chat-input textarea:focus-visible { outline: none; box-shadow: none; }`
 
 ---
 
