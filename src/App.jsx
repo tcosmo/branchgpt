@@ -1,4 +1,9 @@
 import React, { useMemo, useRef, useState, useEffect } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import remarkBreaks from "remark-breaks";
+import rehypeKatex from "rehype-katex";
 
 const SYSTEM_PROMPT =
   "You are a helpful research assistant. Provide concise, precise explanations, " +
@@ -13,6 +18,17 @@ const formatBranchMessage = (selectionText, userText) => {
     `Excerpt:\n"""${selectionText}"""\n\n` +
     `User: ${userText}`
   );
+};
+
+const summarizeTitle = (text) => {
+  const cleaned = text
+    .replace(/[\u2014\u2013]/g, " ")
+    .replace(/[^\w\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return "New branch";
+  const words = cleaned.split(" ");
+  return words.slice(0, 2).join(" ");
 };
 
 const createRootNode = () => ({
@@ -40,6 +56,23 @@ const buildChildrenMap = (nodesById) => {
   return map;
 };
 
+const getNodePathToRoot = (nodeId, nodesById) => {
+  const path = [];
+  const visited = new Set();
+  let currentId = nodeId;
+  while (currentId && nodesById[currentId] && !visited.has(currentId)) {
+    visited.add(currentId);
+    path.push(currentId);
+    currentId = nodesById[currentId].parentId;
+  }
+  return path.reverse();
+};
+
+const buildContextMessages = (nodeId, nodesById) => {
+  const path = getNodePathToRoot(nodeId, nodesById);
+  return path.flatMap((id) => nodesById[id]?.messages ?? []);
+};
+
 const useClickOutside = (ref, handler) => {
   useEffect(() => {
     const listener = (event) => {
@@ -61,22 +94,84 @@ const App = () => {
   const [draft, setDraft] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
+  const [treeView, setTreeView] = useState("graph");
   const [selectionPopover, setSelectionPopover] = useState({
     visible: false,
     text: "",
     rect: null,
     draft: "",
+    placement: "above",
   });
 
   const chatAreaRef = useRef(null);
+  const inputRef = useRef(null);
   const popoverRef = useRef(null);
 
   const activeNode = nodesById[activeNodeId];
   const childrenMap = useMemo(() => buildChildrenMap(nodesById), [nodesById]);
+  const markdownComponents = useMemo(
+    () => ({
+      code({ inline, className, children, ...props }) {
+        if (inline) {
+          return (
+            <code className={`inline-code ${className || ""}`} {...props}>
+              {children}
+            </code>
+          );
+        }
+        return (
+          <pre className="code-block">
+            <code className={className} {...props}>
+              {children}
+            </code>
+          </pre>
+        );
+      },
+    }),
+    [],
+  );
+  const graphLayout = useMemo(() => {
+    const positions = {};
+    const edges = [];
+    let xCursor = 80;
+    let maxDepth = 0;
+
+    const walk = (nodeId, depth) => {
+      maxDepth = Math.max(maxDepth, depth);
+      const children = childrenMap[nodeId] || [];
+      if (children.length === 0) {
+        positions[nodeId] = { x: xCursor, y: depth * 160 + 70 };
+        xCursor += 220;
+        return;
+      }
+      children.forEach((childId) => {
+        edges.push({ from: nodeId, to: childId });
+        walk(childId, depth + 1);
+      });
+      const childXs = children.map((childId) => positions[childId].x);
+      const mid = (Math.min(...childXs) + Math.max(...childXs)) / 2;
+      positions[nodeId] = { x: mid, y: depth * 160 + 70 };
+    };
+
+    walk("root", 0);
+
+    return {
+      positions,
+      edges,
+      width: Math.max(xCursor + 120, 240),
+      height: (maxDepth + 1) * 160 + 120,
+    };
+  }, [childrenMap]);
 
   useClickOutside(popoverRef, () => {
     if (selectionPopover.visible) {
-      setSelectionPopover({ visible: false, text: "", rect: null, draft: "" });
+      setSelectionPopover({
+        visible: false,
+        text: "",
+        rect: null,
+        draft: "",
+        placement: "above",
+      });
     }
   });
 
@@ -138,6 +233,7 @@ const App = () => {
     if (!content.trim() || isLoading) return;
     setError("");
     const trimmed = content.trim();
+    const contextMessages = buildContextMessages(activeNodeId, nodesById);
     updateNodeMessages(activeNodeId, (messages) => [
       ...messages,
       { role: "user", content: trimmed },
@@ -145,9 +241,8 @@ const App = () => {
     setDraft("");
     setIsLoading(true);
     try {
-      const node = nodesById[activeNodeId];
       const reply = await sendToOpenAI([
-        ...node.messages,
+        ...contextMessages,
         { role: "user", content: trimmed },
       ]);
       updateNodeMessages(activeNodeId, (messages) => [
@@ -170,14 +265,24 @@ const App = () => {
       selectionPopover.text.trim(),
       selectionPopover.draft.trim(),
     );
-    const title = selectionPopover.draft.trim().slice(0, 48) || "New branch";
+    const contextMessages = buildContextMessages(activeNodeId, nodesById);
+    const title = summarizeTitle(selectionPopover.draft.trim());
     const newNodeId = addNode(activeNodeId, title, [
       { role: "user", content: userMessage },
     ]);
-    setSelectionPopover({ visible: false, text: "", rect: null, draft: "" });
+    setSelectionPopover({
+      visible: false,
+      text: "",
+      rect: null,
+      draft: "",
+      placement: "above",
+    });
     setIsLoading(true);
     try {
-      const reply = await sendToOpenAI([{ role: "user", content: userMessage }]);
+      const reply = await sendToOpenAI([
+        ...contextMessages,
+        { role: "user", content: userMessage },
+      ]);
       updateNodeMessages(newNodeId, (messages) => [
         ...messages,
         { role: "assistant", content: reply || "No response returned." },
@@ -192,7 +297,13 @@ const App = () => {
   const handleSelection = () => {
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed) {
-      setSelectionPopover({ visible: false, text: "", rect: null, draft: "" });
+      setSelectionPopover({
+        visible: false,
+        text: "",
+        rect: null,
+        draft: "",
+        placement: "above",
+      });
       return;
     }
     const anchorNode = selection.anchorNode;
@@ -206,18 +317,26 @@ const App = () => {
     }
     const text = selection.toString().trim();
     if (!text) {
-      setSelectionPopover({ visible: false, text: "", rect: null, draft: "" });
+      setSelectionPopover({
+        visible: false,
+        text: "",
+        rect: null,
+        draft: "",
+        placement: "above",
+      });
       return;
     }
     const range = selection.getRangeAt(0);
     const rect = range.getBoundingClientRect();
-    const top = Math.max(rect.top - 12, 12);
+    const placement = rect.top > 220 ? "above" : "below";
+    const top = placement === "above" ? rect.top - 8 : rect.bottom + 8;
     const left = Math.min(rect.left, window.innerWidth - 320);
     setSelectionPopover({
       visible: true,
       text,
       rect: { top, left },
       draft: "",
+      placement,
     });
   };
 
@@ -239,63 +358,171 @@ const App = () => {
     );
   };
 
+  const resizeInput = (element) => {
+    if (!element) return;
+    element.style.height = "auto";
+    element.style.height = `${element.scrollHeight}px`;
+  };
+
+  useEffect(() => {
+    resizeInput(inputRef.current);
+  }, [draft]);
+
   return (
     <div className="app">
       <aside className="sidebar">
         <div className="sidebar-header">
           <h1>Chat Tree</h1>
           <p>Branches update as you highlight text.</p>
+          <div className="view-toggle">
+            <button
+              type="button"
+              className={treeView === "graph" ? "active" : ""}
+              onClick={() => setTreeView("graph")}
+              aria-label="Graph view"
+              title="Graph view"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="6" cy="6" r="2.5" />
+                <circle cx="18" cy="6" r="2.5" />
+                <circle cx="12" cy="18" r="2.5" />
+                <path d="M8 6h8M7.5 7.5l3.5 8M16.5 7.5l-3.5 8" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              className={treeView === "list" ? "active" : ""}
+              onClick={() => setTreeView("list")}
+              aria-label="List view"
+              title="List view"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+            </button>
+          </div>
         </div>
-        <div className="tree">{renderTree("root")}</div>
+        {treeView === "graph" ? (
+          <div className="tree-graph">
+            <svg
+              width="100%"
+              height={graphLayout.height}
+              viewBox={`0 0 ${graphLayout.width} ${graphLayout.height}`}
+            >
+              {graphLayout.edges.map((edge) => {
+                const from = graphLayout.positions[edge.from];
+                const to = graphLayout.positions[edge.to];
+                if (!from || !to) return null;
+                return (
+                  <line
+                    key={`${edge.from}-${edge.to}`}
+                    x1={from.x}
+                    y1={from.y}
+                    x2={to.x}
+                    y2={to.y}
+                    className="graph-edge"
+                  />
+                );
+              })}
+              {Object.entries(graphLayout.positions).map(([nodeId, pos]) => {
+                const node = nodesById[nodeId];
+                const words = node.title.split(" ").filter(Boolean);
+                return (
+                  <g
+                    key={nodeId}
+                    className={`graph-node ${nodeId === activeNodeId ? "active" : ""
+                      }`}
+                    onClick={() => setActiveNodeId(nodeId)}
+                  >
+                    <circle cx={pos.x} cy={pos.y} r="34" />
+                    <text x={pos.x} y={pos.y} textAnchor="middle">
+                      {words.length > 1 ? (
+                        <>
+                          <tspan x={pos.x} dy="-6">
+                            {words[0]}
+                          </tspan>
+                          <tspan x={pos.x} dy="14">
+                            {words.slice(1).join(" ")}
+                          </tspan>
+                        </>
+                      ) : (
+                        <tspan x={pos.x} dy="4">
+                          {words[0]}
+                        </tspan>
+                      )}
+                    </text>
+                  </g>
+                );
+              })}
+            </svg>
+          </div>
+        ) : (
+          <div className="tree">{renderTree("root")}</div>
+        )}
       </aside>
       <main className="chat">
-        <header className="chat-header">
-          <div>
-            <h2>{activeNode.title}</h2>
-            <span className="chat-meta">
-              {activeNode.messages.length} messages
-            </span>
-          </div>
-          {isLoading && <span className="loading">Thinking...</span>}
-        </header>
-        <section
-          className="chat-area"
-          ref={chatAreaRef}
-          onMouseUp={handleSelection}
-        >
-          {activeNode.messages.map((message, index) => (
-            <div
-              key={`${message.role}-${index}`}
-              className={`message ${message.role}`}
-            >
-              <div className="message-role">
-                {message.role === "user" ? "You" : "Assistant"}
-              </div>
-              <div className="message-content">{message.content}</div>
+        <div className="chat-frame">
+          <header className="chat-header">
+            <div>
+              <h2>{activeNode.title}</h2>
+              <span className="chat-meta">
+                {activeNode.messages.length} messages
+              </span>
             </div>
-          ))}
-          {error && <div className="error-banner">{error}</div>}
-        </section>
-        <footer className="chat-input">
-          <textarea
-            placeholder="Ask something in this node..."
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            rows={3}
-          />
-          <button
-            type="button"
-            onClick={() => handleSend(draft)}
-            disabled={isLoading || !draft.trim()}
+            {isLoading && <span className="loading">Thinking...</span>}
+          </header>
+          <section
+            className="chat-area"
+            ref={chatAreaRef}
+            onMouseUp={handleSelection}
           >
-            Send
-          </button>
-        </footer>
+            {activeNode.messages.map((message, index) => (
+              <div
+                key={`${message.role}-${index}`}
+                className={`message ${message.role}`}
+              >
+                <div className="message-role">
+                  {message.role === "user" ? "You" : "Assistant"}
+                </div>
+                <div className="message-content">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm, remarkMath, remarkBreaks]}
+                    rehypePlugins={[rehypeKatex]}
+                    components={markdownComponents}
+                  >
+                    {message.content}
+                  </ReactMarkdown>
+                </div>
+              </div>
+            ))}
+            {error && <div className="error-banner">{error}</div>}
+          </section>
+          <footer className="chat-input">
+            <textarea
+              ref={inputRef}
+              placeholder="Ask anything"
+              value={draft}
+              onChange={(event) => {
+                setDraft(event.target.value);
+                resizeInput(event.target);
+              }}
+              rows={3}
+            />
+            <button
+              type="button"
+              onClick={() => handleSend(draft)}
+              disabled={isLoading || !draft.trim()}
+            >
+              Send
+            </button>
+          </footer>
+        </div>
       </main>
       {selectionPopover.visible && selectionPopover.rect && (
         <div
           ref={popoverRef}
           className="selection-popover"
+          data-placement={selectionPopover.placement}
           style={{
             top: `${selectionPopover.rect.top}px`,
             left: `${selectionPopover.rect.left}px`,
@@ -325,6 +552,7 @@ const App = () => {
                   text: "",
                   rect: null,
                   draft: "",
+                  placement: "above",
                 })
               }
             >
