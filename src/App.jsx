@@ -6,6 +6,8 @@ import React, {
   useLayoutEffect,
 } from "react";
 import ReactMarkdown from "react-markdown";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import remarkBreaks from "remark-breaks";
@@ -421,6 +423,53 @@ const remarkLatexDelimiters = () => {
   };
 };
 
+const normalizeMathContent = (content) => {
+  if (!content) return "";
+  let next = content
+    .replace(/\\\[/g, "$$")
+    .replace(/\\\]/g, "$$")
+    .replace(/\\\(/g, "$")
+    .replace(/\\\)/g, "$");
+
+  const stripEscapedStars = (value) => value.replace(/\\+\*/g, "*");
+
+  next = next.replace(/\$\$[\s\S]*?\$\$/g, (block) => stripEscapedStars(block));
+  next = next.replace(/\$[^$\n]*?\$/g, (block) => stripEscapedStars(block));
+
+  next = next.replace(
+    /(^|\n)\s*\[\s*\n([\s\S]*?)\n\s*\]\s*(?=\n|$)/g,
+    (match, lead, body) => {
+      if (!/[\\]|[_^]/.test(body)) return match;
+      const trimmed = body.trim();
+      if (!trimmed) return match;
+      return `${lead}$$\n${trimmed}\n$$`;
+    },
+  );
+
+  return next;
+};
+
+const remarkNormalizeMath = () => {
+  const transformNode = (node) => {
+    if (!node || typeof node !== "object") return;
+    if ((node.type === "math" || node.type === "inlineMath") && typeof node.value === "string") {
+      node.value = node.value.replace(/\\+\*/g, "*");
+      return;
+    }
+    if (Array.isArray(node.children)) {
+      node.children.forEach(transformNode);
+      return;
+    }
+    Object.values(node).forEach((value) => {
+      if (value && typeof value === "object") transformNode(value);
+    });
+  };
+
+  return (tree) => {
+    transformNode(tree);
+  };
+};
+
 const createRootNode = () => ({
   id: "root",
   parentId: null,
@@ -571,7 +620,7 @@ const App = () => {
   const [pendingTeleport, setPendingTeleport] = useState(null);
   const [flashBranchNodeId, setFlashBranchNodeId] = useState(null);
   const [draft, setDraft] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
+  const [loadingTarget, setLoadingTarget] = useState(null);
   const [error, setError] = useState("");
   const [treeView, setTreeView] = useState("graph");
   const [sidebarWidth, setSidebarWidth] = useState(320);
@@ -598,12 +647,23 @@ const App = () => {
     mode: "menu",
     draft: "",
   });
+  const [selectionMenu, setSelectionMenu] = useState({
+    visible: false,
+    text: "",
+    rect: null,
+    selectionRect: null,
+    placement: "above",
+    messageIndex: null,
+    nodeId: null,
+    treeId: null,
+  });
   const [tempHighlight, setTempHighlight] = useState(null);
 
   const chatAreaRef = useRef(null);
   const inputRef = useRef(null);
   const popoverRef = useRef(null);
   const treeMenuRef = useRef(null);
+  const selectionMenuRef = useRef(null);
   const graphContainerRef = useRef(null);
   const sidebarRef = useRef(null);
   const panStateRef = useRef({
@@ -630,6 +690,12 @@ const App = () => {
   const parentNode = parentNodeId ? nodesById[parentNodeId] : null;
   const assistantModelLabel = MODEL.replace(/^gpt/i, "GPT");
   const assistantLabel = `Assistant (${assistantModelLabel})`;
+  const isLoading = Boolean(loadingTarget);
+  const isActiveNodeLoading = Boolean(
+    loadingTarget &&
+    loadingTarget.treeId === activeTreeId &&
+    loadingTarget.nodeId === activeNodeId,
+  );
   const selectionHint = (
     <>
       Tip: Highlight text, then press{" "}
@@ -730,12 +796,19 @@ const App = () => {
             </code>
           );
         }
+        const match = /language-(\w+)/.exec(className || "");
+        const language = match?.[1] || "text";
+        const code = String(children).replace(/\n$/, "");
         return (
-          <pre className="code-block">
-            <code className={className} {...props}>
-              {children}
-            </code>
-          </pre>
+          <SyntaxHighlighter
+            style={vscDarkPlus}
+            language={language}
+            PreTag="div"
+            className="code-block"
+            {...props}
+          >
+            {code}
+          </SyntaxHighlighter>
         );
       },
     }),
@@ -853,6 +926,19 @@ const App = () => {
     });
   };
 
+  const closeSelectionMenu = () => {
+    setSelectionMenu({
+      visible: false,
+      text: "",
+      rect: null,
+      selectionRect: null,
+      placement: "above",
+      messageIndex: null,
+      nodeId: null,
+      treeId: null,
+    });
+  };
+
   const openTreeMenu = (treeId, event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -955,12 +1041,17 @@ const App = () => {
     if (treeMenu.visible) closeTreeMenu();
   });
 
+  useClickOutside(selectionMenuRef, () => {
+    if (selectionMenu.visible) closeSelectionMenu();
+  });
+
   useEffect(() => {
     const onKeyDown = (event) => {
       if (event.key === "Shift") {
         if (event.metaKey || event.ctrlKey || event.altKey) return;
         const payload = getSelectionPayload();
         if (payload) {
+          if (selectionMenu.visible) closeSelectionMenu();
           setSelectionPopover({
             visible: true,
             text: payload.text,
@@ -997,11 +1088,14 @@ const App = () => {
         );
         setTempHighlight(null);
       }
+      if (selectionMenu.visible) {
+        closeSelectionMenu();
+      }
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectionPopover.visible, activeNodeId, activeTreeId, tempHighlight]);
+  }, [selectionPopover.visible, selectionMenu.visible, activeNodeId, activeTreeId, tempHighlight]);
 
   useEffect(() => {
     if (tempHighlight) {
@@ -1026,6 +1120,7 @@ const App = () => {
       nodeId: null,
       treeId: null,
     });
+    closeSelectionMenu();
     setHoveredBranchNodeId(null);
     setDraft("");
     setError("");
@@ -1122,32 +1217,22 @@ const App = () => {
   };
 
   const sendToOpenAI = async (messages, hiddenContext = "") => {
-    const apiKey = import.meta.env.VITE_OPENAI_API_KEY;
-    if (!apiKey) {
-      throw new Error("Missing VITE_OPENAI_API_KEY in .env");
-    }
-    const systemMessages = [{ role: "system", content: SYSTEM_PROMPT }];
-    if (hiddenContext && hiddenContext.trim()) {
-      systemMessages.push({ role: "system", content: hiddenContext.trim() });
-    }
-    const response = await fetch(API_URL, {
+    const response = await fetch("/api/chat", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: MODEL,
-        messages: [...systemMessages, ...messages],
-        temperature: 0.2,
+        messages,
+        hiddenContext,
       }),
     });
     if (!response.ok) {
       const details = await response.text();
-      throw new Error(`OpenAI error ${response.status}: ${details}`);
+      throw new Error(`Server error ${response.status}: ${details}`);
     }
     const data = await response.json();
-    return data.choices?.[0]?.message?.content?.trim() ?? "";
+    return data.reply?.trim?.() ?? "";
   };
 
   const requestBranchTitle = async (userMessage, branchExcerpt) => {
@@ -1166,7 +1251,7 @@ const App = () => {
   };
 
   const handleSend = async (content) => {
-    if (!content.trim() || isLoading) return;
+    if (!content.trim() || loadingTarget) return;
     setError("");
     const trimmed = content.trim();
     let treeIdSnapshot = activeTreeId;
@@ -1198,7 +1283,7 @@ const App = () => {
         /^Tree \d+$/.test(treeSnapshot.title));
 
     setDraft("");
-    setIsLoading(true);
+    setLoadingTarget({ treeId: treeIdSnapshot, nodeId: nodeIdSnapshot });
     try {
       const replyPromise = sendToOpenAI(
         [...(nodeSnapshot?.messages ?? []), { role: "user", content: trimmed }],
@@ -1233,7 +1318,7 @@ const App = () => {
     } catch (err) {
       setError(err.message || "Failed to reach OpenAI.");
     } finally {
-      setIsLoading(false);
+      setLoadingTarget(null);
     }
   };
 
@@ -1255,6 +1340,7 @@ const App = () => {
     if (!selectionPopover.text.trim() || !selectionPopover.draft.trim()) {
       return;
     }
+    if (loadingTarget) return;
     setError("");
     const treeId = selectionPopover.treeId || activeTreeId;
     if (!treeId) return;
@@ -1322,6 +1408,7 @@ const App = () => {
       treeId: null,
     });
     window.getSelection()?.removeAllRanges?.();
+    setLoadingTarget({ treeId, nodeId: newNodeId });
     try {
       // Build context against a snapshot that includes the new node (setState is async).
       const treeSnapshot = treesById[treeId];
@@ -1368,6 +1455,8 @@ const App = () => {
         ...node,
         requestStatus: "idle",
       }));
+    } finally {
+      setLoadingTarget(null);
     }
   };
 
@@ -1411,8 +1500,10 @@ const App = () => {
   };
 
   const handleSelection = (event) => {
+    if (selectionMenu.visible && event?.button === 2) return;
     const payload = getSelectionPayload();
     if (!payload) {
+      if (selectionMenu.visible) closeSelectionMenu();
       if (selectionPopover.visible) {
         setSelectionPopover({
           visible: false,
@@ -1429,6 +1520,7 @@ const App = () => {
     }
 
     if (!event?.shiftKey) {
+      if (selectionMenu.visible) closeSelectionMenu();
       if (selectionPopover.visible) {
         setSelectionPopover({
           visible: false,
@@ -1456,6 +1548,71 @@ const App = () => {
     });
   };
 
+  const handleSelectionContextMenu = (event) => {
+    const payload = getSelectionPayload();
+    if (!payload) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const left = Math.min(event.clientX, window.innerWidth - 220);
+    const top = Math.min(event.clientY, window.innerHeight - 160);
+    setSelectionMenu({
+      visible: true,
+      text: payload.text,
+      rect: { top, left },
+      selectionRect: payload.rect,
+      placement: payload.placement,
+      messageIndex: payload.messageIndex,
+      nodeId: activeNodeId,
+      treeId: activeTreeId,
+    });
+  };
+
+  const handleSelectionCopy = async () => {
+    const text = selectionMenu.text;
+    if (!text) return;
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const temp = document.createElement("textarea");
+        temp.value = text;
+        temp.setAttribute("readonly", "");
+        temp.style.position = "absolute";
+        temp.style.left = "-9999px";
+        document.body.appendChild(temp);
+        temp.select();
+        document.execCommand("copy");
+        document.body.removeChild(temp);
+      }
+    } catch {
+      // Ignore clipboard failures.
+    }
+    closeSelectionMenu();
+  };
+
+  const handleSelectionAsk = () => {
+    if (!selectionMenu.text?.trim()) return;
+    setSelectionPopover({
+      visible: true,
+      text: selectionMenu.text,
+      rect: selectionMenu.selectionRect || selectionMenu.rect,
+      draft: "",
+      placement: selectionMenu.placement,
+      messageIndex: selectionMenu.messageIndex,
+      nodeId: selectionMenu.nodeId || activeNodeId,
+      treeId: selectionMenu.treeId || activeTreeId,
+    });
+    closeSelectionMenu();
+  };
+
+  const handleTreeItemClick = (nodeId) => {
+    if (nodeId === activeNodeId) return;
+    if (nodeId === parentNodeId && activeNodeId) {
+      setPendingTeleport({ parentNodeId: nodeId, childNodeId: activeNodeId });
+    }
+    setActiveNodeId(nodeId);
+  };
+
   const renderTree = (nodeId, depth = 0) => {
     const node = nodesById[nodeId];
     const children = childrenMap[nodeId] || [];
@@ -1467,7 +1624,7 @@ const App = () => {
           className={`tree-item ${activeNodeId === nodeId ? "active" : ""} ${hoveredBranchNodeId === nodeId ? "branch-hover" : ""
             }`}
           style={{ paddingLeft: `${12 + depth * 16}px` }}
-          onClick={() => setActiveNodeId(nodeId)}
+          onClick={() => handleTreeItemClick(nodeId)}
           onMouseEnter={() => setHoveredBranchNodeId(nodeId)}
           onMouseLeave={() => setHoveredBranchNodeId(null)}
           type="button"
@@ -1973,6 +2130,7 @@ const App = () => {
                 className="chat-area"
                 ref={chatAreaRef}
                 onMouseUp={handleSelection}
+                onContextMenu={handleSelectionContextMenu}
               >
                 {activeNode.messages.map((message, index) => (
                   <div
@@ -1990,18 +2148,19 @@ const App = () => {
                           remarkLatexDelimiters,
                           remarkGfm,
                           remarkMath,
+                          remarkNormalizeMath,
                           remarkBreaks,
                         ]}
                         rehypePlugins={[rehypeKatex]}
                         urlTransform={(url) => url}
                         components={markdownComponents}
                       >
-                        {message.content}
+                        {normalizeMathContent(message.content)}
                       </ReactMarkdown>
                     </div>
                   </div>
                 ))}
-                {isLoading && (
+                {isActiveNodeLoading && (
                   <div className="message assistant message--thinking">
                     <div className="message-role">{assistantLabel}</div>
                     <div className="message-content">
@@ -2157,6 +2316,25 @@ const App = () => {
               Create branch
             </button>
           </div>
+        </div>
+      )}
+      {selectionMenu.visible && selectionMenu.rect && (
+        <div
+          ref={selectionMenuRef}
+          className="selection-menu"
+          style={{
+            top: `${selectionMenu.rect.top}px`,
+            left: `${selectionMenu.rect.left}px`,
+          }}
+          role="menu"
+          aria-label="Selection options"
+        >
+          <button type="button" className="selection-menu-item" onClick={handleSelectionAsk}>
+            New Branch
+          </button>
+          <button type="button" className="selection-menu-item" onClick={handleSelectionCopy}>
+            Copy
+          </button>
         </div>
       )}
       {treeMenu.visible && treeMenu.rect && treeMenu.treeId && (

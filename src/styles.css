@@ -781,7 +781,7 @@ body.is-resizing {
 
 .message-content .code-block {
     margin: 10px 0;
-    padding: 10px 12px;
+    padding: 12px 14px;
     background: #141821;
     border: 1px solid #2c3546;
     border-radius: 8px;
@@ -792,6 +792,11 @@ body.is-resizing {
     font-family: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono",
         "Courier New", monospace;
     font-size: 0.92em;
+    background: transparent;
+}
+
+.message-content .code-block pre {
+    margin: 0;
 }
 
 .message-content .katex {
@@ -1075,6 +1080,32 @@ body.is-resizing {
     z-index: 1000;
     box-shadow: 0 12px 24px rgba(0, 0, 0, 0.4);
     transform: translateY(0);
+}
+
+.selection-menu {
+    position: fixed;
+    width: 220px;
+    background: #1b202b;
+    border: 1px solid #2c3546;
+    border-radius: 12px;
+    padding: 6px;
+    z-index: 1800;
+    box-shadow: 0 12px 24px rgba(0, 0, 0, 0.45);
+}
+
+.selection-menu-item {
+    width: 100%;
+    text-align: left;
+    border: none;
+    background: transparent;
+    color: #e6e9ef;
+    padding: 8px 10px;
+    border-radius: 10px;
+    cursor: pointer;
+}
+
+.selection-menu-item:hover {
+    background: #1f2532;
 }
 
 .selection-popover[data-placement="above"] {

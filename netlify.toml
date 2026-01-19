@@ -4,5 +4,6 @@
 
 [[redirects]]
   from = "/*"
-  to = "/index.html"
-  status = 200
+  to = "https://yellow-pond-0047e6203.4.azurestaticapps.net/:splat"
+  status = 301
+  force = true
